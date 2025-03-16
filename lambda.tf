@@ -1,75 +1,77 @@
-# Create a Lambda function
-resource "aws_lambda_function" "rotation_lambda" {
-  function_name = "rds_lambda_function"
-  handler       = "lambda_function.lambda_handler"
-  runtime       = "python3.9"
-  //role          = aws_iam_role.lambda_role.arn
-  role = aws_iam_role.rotation_lambda_role.arn 
 
-  filename         = "lambda_function.zip"
-  source_code_hash = filebase64sha256("lambda_function.zip")
 
-  vpc_config {
-    subnet_ids         = [aws_subnet.subnet_a.id, aws_subnet.subnet_b.id]
-    security_group_ids = [aws_security_group.lambda_sg.id] # Add security group
+resource "aws_security_group" "lambda_sg" {
+  name   = "${local.name_prefix}-lambda"
+  vpc_id = aws_vpc.main.id
+
+  ingress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
   }
-
-  environment {
-    variables = {
-      SECRET_ARN = aws_secretsmanager_secret.rds_credentials.arn
-    }
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
   }
 }
 
-# IAM role for the rotation Lambda function
-resource "aws_iam_role" "rotation_lambda_role" {
-  name = "aalimsee_rotation_lambda_role"
+# Ensure the Lambda function has permission to update the MySQL password.
+resource "aws_iam_role" "lambda_rotation_role" {
+  name = "${local.name_prefix}-rotation-role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
-      {
-        Action = "sts:AssumeRole"
-        Effect = "Allow"
-        Principal = {
-          Service = "lambda.amazonaws.com"
-        }
-      }
-    ]
+    Statement = [{
+      Action    = "sts:AssumeRole"
+      Effect    = "Allow"
+      Principal = { Service = "lambda.amazonaws.com" }
+    }]
   })
-
-tags = { Name = "lambda_role", description = "Created by Aaron"}
 }
 
-# Attach policies to the rotation Lambda function role
-resource "aws_iam_role_policy" "rotation_lambda_policy" {
-  role = aws_iam_role.rotation_lambda_role.id
+resource "aws_iam_policy" "lambda_rotation_policy" {
+  name        = "${local.name_prefix}-rotation-policy"
+  description = "IAM policy for secret rotation Lambda"
 
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
-      # Permissions for Secrets Manager
       {
         Effect = "Allow"
         Action = [
           "secretsmanager:GetSecretValue",
-          "secretsmanager:DescribeSecret",
           "secretsmanager:PutSecretValue",
+          "secretsmanager:DescribeSecret",
           "secretsmanager:UpdateSecretVersionStage"
         ]
-        Resource = aws_secretsmanager_secret.rds_credentials.arn
+        Resource = aws_secretsmanager_secret.mysql_secret.arn
+        //Resource = "arn:aws:secretsmanager:us-east-1:255945442255:secret:*"
       },
-      # Permissions for RDS (required for database access)
+      {
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:GetRandomPassword"
+        ]
+        Resource = "*"
+      },
       {
         Effect = "Allow"
         Action = [
           "rds:ModifyDBInstance",
           "rds:DescribeDBInstances",
-        #  "rds-db:connect" # Allows Lambda to connect to the RDS instance
         ]
-        Resource = aws_db_instance.rds_instance.arn
+        Resource = aws_db_instance.mysql.arn
       },
-      # Permissions for CloudWatch Logs
+      {
+        Effect = "Allow"
+        Action = [
+          "rds-db:connect"
+        ]
+        Resource = "arn:aws:rds-db:255945442255:dbuser:*/*"
+      },
       {
         Effect = "Allow"
         Action = [
@@ -77,15 +79,20 @@ resource "aws_iam_role_policy" "rotation_lambda_policy" {
           "logs:CreateLogStream",
           "logs:PutLogEvents"
         ]
-        Resource = "arn:aws:logs:*:*:*"
+        Resource = "*"
       },
-      # Permissions for EC2 (required for VPC-enabled Lambda)
-      {
+      { # Modify IAM policy to include network interface permissions for Lambda VPC
         Effect = "Allow"
         Action = [
           "ec2:CreateNetworkInterface",
           "ec2:DescribeNetworkInterfaces",
-          "ec2:DeleteNetworkInterface"
+          "ec2:DeleteNetworkInterface",
+          //"ec2:DescribeSecurityGroups",
+          "ec2:DescribeSubnets",
+          //"ec2:DescribeVpcs",
+          "ec2:DetachNetworkInterface",
+          "ec2:AssignPrivateIpAddresses",
+          "ec2:UnassignPrivateIpAddresses"
         ]
         Resource = "*"
       }
@@ -93,10 +100,48 @@ resource "aws_iam_role_policy" "rotation_lambda_policy" {
   })
 }
 
-# Allow Secrets Manager to invoke the Lambda function
-resource "aws_lambda_permission" "allow_secrets_manager" {
-  statement_id  = "AllowExecutionFromSecretsManager"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.rotation_lambda.function_name
-  principal     = "secretsmanager.amazonaws.com"
+resource "aws_iam_role_policy_attachment" "lambda_attach" {
+  role       = aws_iam_role.lambda_rotation_role.name
+  policy_arn = aws_iam_policy.lambda_rotation_policy.arn
+}
+
+data "archive_file" "lambda_zip" {
+  type        = "zip"
+  source_dir  = "${path.module}/package"
+  output_path = "${path.module}/package.zip"
+}
+
+# Deploy a Lambda function that will handle password rotation.
+resource "aws_lambda_function" "secret_rotation" {
+  function_name = "${local.name_prefix}-secret-rotation"
+  role          = aws_iam_role.lambda_rotation_role.arn
+  runtime       = "python3.13"
+  handler       = "lambda_function.lambda_handler"
+  timeout       = 10
+
+  filename         = data.archive_file.lambda_zip.output_path
+  source_code_hash = data.archive_file.lambda_zip.output_base64sha256
+
+  vpc_config {
+    subnet_ids = [
+      aws_subnet.private[0].id,
+      aws_subnet.private[1].id
+    ]
+    security_group_ids = [aws_security_group.lambda_sg.id]
+  }
+
+  environment {
+    variables = {
+      SECRET_ARN = aws_secretsmanager_secret.mysql_secret.arn # pass secret ARN
+      RDS_HOST   = aws_db_instance.mysql.address              # pass RDS endpoint
+      //EXCLUDE_CHARACTERS = /@"'\
+      //EXCLUDE_LOWERCASE = "false"
+      //EXCLUDE_NUMBERS = "false"
+      //EXCLUDE_PUNCTUATION = "false"
+      //EXCLUDE_UPPERCASE = "false"
+      //PASSWORD_LENGTH = "32"
+      //REQUIRE_EACH_INCLUDED_TYPE = "true"
+      //SECRETS_MANAGER_ENDPOINT = https://secretsmanager.us-east-1.amazonaws.com
+    }
+  }
 }

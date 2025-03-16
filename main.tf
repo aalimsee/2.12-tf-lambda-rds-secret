@@ -1,69 +1,128 @@
 
-# Generate a random password
-resource "random_password" "db_password" {
-  length           = 16
-  special          = true
-  override_special = "!#$%&*()-_=+[]{}<>:?"
+
+variable "enable_nat" {
+  description = "Set to true to create a NAT Gateway"
+  type        = bool
+  default     = true
 }
 
-# Create a secret in AWS Secrets Manager
-resource "aws_secretsmanager_secret" "rds_credentials" {
-  name_prefix = "rds_credentials_"
-  description = "Created by Aaron for RDS MySQL"
-}
-
-resource "aws_secretsmanager_secret_version" "rds_credentials_version" {
-  secret_id = aws_secretsmanager_secret.rds_credentials.id
-  secret_string = jsonencode({
-    username = "db_user"
-    password = random_password.db_password.result
-    host     = aws_db_instance.rds_instance.endpoint
-    dbname   = "mydatabase"
-  })
-}
-
-# Enable automatic rotation for the secret
-resource "aws_secretsmanager_secret_rotation" "rds_credentials_rotation" {
-  secret_id           = aws_secretsmanager_secret.rds_credentials.id
-  rotation_lambda_arn = aws_lambda_function.rotation_lambda.arn
-
-  rotation_rules {
-    automatically_after_days = 30 # Rotate every 30 days
+variable "tags" {
+  default = {
+    Name        = "CE9 Project Team XXX"
+    CreatedBy   = "Managed by Terraform"
+    Environment = "dev"
   }
 }
 
-# Create an RDS instance
-/* resource "aws_db_instance" "rds_instance" {
-  identifier           = "mydbinstance"
-  allocated_storage    = 20
-  storage_type         = "gp2"
-  engine               = "mysql"
-  engine_version       = "5.7"
-  instance_class       = "db.t3.micro"
-  name                 = "mydatabase"
-  username             = "db_user"
-  password             = random_password.db_password.result
-  parameter_group_name = "default.mysql5.7"
-  skip_final_snapshot  = true
-  publicly_accessible  = false
-  vpc_security_group_ids = [aws_security_group.rds_sg.id]
-  db_subnet_group_name = aws_db_subnet_group.rds_subnet_group.name
-} */
+locals {
+  name_prefix = "aaron"
+  cidr_block  = "144.0.0.0/16"
+  azs         = ["us-east-1a", "us-east-1b"]
+}
 
-# Lambda function for secret rotation
-/* resource "aws_lambda_function" "rotation_lambda" {
-  function_name = "secret_rotation_lambda"
-  handler       = "lambda_function.lambda_handler"
-  runtime       = "python3.9"
-  role          = aws_iam_role.rotation_lambda_role.arn
 
-  filename         = "lambda_function.zip"
-  source_code_hash = filebase64sha256("lambda_function.zip")
+resource "aws_vpc" "main" {
+  cidr_block           = local.cidr_block
+  enable_dns_support   = true
+  enable_dns_hostnames = true
 
-  environment {
-    variables = {
-      SECRET_ARN = aws_secretsmanager_secret.rds_credentials.arn
-    }
+  tags = var.tags
+}
+
+resource "aws_internet_gateway" "igw" {
+  vpc_id = aws_vpc.main.id
+
+  tags = var.tags
+}
+
+resource "aws_subnet" "public" {
+  count                   = length(local.azs)
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = cidrsubnet(local.cidr_block, 8, count.index + 1)
+  availability_zone       = local.azs[count.index]
+  map_public_ip_on_launch = true
+
+  tags = {
+    Name = "${local.name_prefix}-public-${local.azs[count.index]}"
   }
-} */
+}
+
+resource "aws_subnet" "private" {
+  count             = length(local.azs)
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = cidrsubnet(local.cidr_block, 8, count.index + 101)
+  availability_zone = local.azs[count.index]
+
+  tags = {
+    Name = "${local.name_prefix}-private-${local.azs[count.index]}"
+  }
+}
+
+
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.main.id
+
+  tags = {
+    Name = "${local.name_prefix}-public-rt"
+  }
+}
+
+# --- Explicit subnet associations
+resource "aws_route_table_association" "public" {
+  count          = length(local.azs)
+  subnet_id      = aws_subnet.public[count.index].id
+  route_table_id = aws_route_table.public.id
+}
+
+
+resource "aws_route" "public_internet_access" {
+  route_table_id         = aws_route_table.public.id
+  destination_cidr_block = "0.0.0.0/0"
+  gateway_id             = aws_internet_gateway.igw.id
+}
+
+
+
+resource "aws_eip" "nat" {
+  count  = var.enable_nat ? 1 : 0
+  domain = "vpc"
+
+  tags = {
+    Name = "${local.name_prefix}-nat-eip"
+  }
+}
+
+resource "aws_nat_gateway" "nat" {
+  count         = var.enable_nat ? 1 : 0
+  allocation_id = aws_eip.nat[0].id
+  subnet_id     = aws_subnet.public[0].id
+
+  tags = {
+    Name = "${local.name_prefix}-nat-gw"
+  }
+}
+
+resource "aws_route_table" "private" {
+  vpc_id = aws_vpc.main.id
+
+  tags = {
+    Name = "${local.name_prefix}-private-rt"
+  }
+}
+
+resource "aws_route_table_association" "private" {
+  count          = length(local.azs)
+  subnet_id      = aws_subnet.private[count.index].id
+  route_table_id = aws_route_table.private.id
+}
+
+resource "aws_route" "private_nat_access" {
+  count                  = var.enable_nat ? 1 : 0
+  route_table_id         = aws_route_table.private.id
+  destination_cidr_block = "0.0.0.0/0"
+  nat_gateway_id         = aws_nat_gateway.nat[0].id
+}
+
+
+
 

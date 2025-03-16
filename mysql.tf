@@ -10,7 +10,6 @@ resource "aws_security_group" "rds_sg" {
     protocol        = "tcp"
     security_groups = [aws_security_group.lambda_sg.id]
   }
-
   egress {
     from_port   = 0
     to_port     = 0
@@ -19,12 +18,14 @@ resource "aws_security_group" "rds_sg" {
   }
 }
 
+
 # --- passwords must be at least 8 characters long and can't contain "/", "@", or double quotes ("")
 resource "random_password" "password" {
   length           = 16
   special          = true
   override_special = "!#$%&*-_=+[]{}<>:?"
 }
+
 
 resource "aws_db_instance" "mysql" {
   identifier        = "${local.name_prefix}-mysql-instance"
@@ -38,9 +39,12 @@ resource "aws_db_instance" "mysql" {
   //iam_database_authentication_enabled = true 
 
   # Set to true to allow RDS to manage the master user password in Secrets Manager
+  # Secret created will be link to identifier?
+  # rds!db-XXXX created
   manage_master_user_password = true
+  username                    = "admin"
 
-  username = jsondecode(aws_secretsmanager_secret_version.mysql_secret_version.secret_string)["username"]
+  //username = jsondecode(aws_secretsmanager_secret_version.mysql_secret_version.secret_string)["username"]
   //password = jsondecode(aws_secretsmanager_secret_version.mysql_secret_version.secret_string)["password"]
 
   publicly_accessible = false
@@ -52,7 +56,14 @@ resource "aws_db_instance" "mysql" {
   apply_immediately = true
 }
 
-output "mysql_mydb" { value = trim(aws_db_instance.mysql.endpoint, ":3306") }
+output "mysql_mydb_endpoint" { value = trim(aws_db_instance.mysql.endpoint, ":3306") }
+
+
+# Access the secret ARN with manage_master_user_password = true
+output "master_user_secret_arn" {
+  value = aws_db_instance.mysql.master_user_secret[0].secret_arn
+  //value = aws_db_instance.mysql.master_user_secret[0]
+}
 
 resource "aws_db_subnet_group" "mysql_subnet_group" {
   name = "${local.name_prefix}-mysql-subnet-group"
@@ -63,13 +74,15 @@ resource "aws_db_subnet_group" "mysql_subnet_group" {
 }
 
 /* data "aws_secretsmanager-secret" "mysql_secret" {
-  username  = "admin"
-  depend_on = [aws_secretsmanager_secret.mysql_secret]
+  arn = [aws_db_instance.mysql.master_user_secret[0].secret_name]
+}
+
+output "mysql_secret" {
+  value = aws_secretsmanager_secret.mysql_secret.arn
 } */
 
-
-
-# Create a Secrets Manager Secret for RDS MySQL.
+# --- below 3 resource blocks are remove since manage_master_user_password = true
+/* # Create a Secrets Manager Secret for RDS MySQL.
 resource "aws_secretsmanager_secret" "mysql_secret" {
   name                    = "${local.name_prefix}-mysql-secret-5"
   description             = "RDS MySQL Credentials"
@@ -102,7 +115,7 @@ resource "aws_secretsmanager_secret_version" "mysql_secret_version" {
     //port     = 3306
     //dbInstanceIdentifier = "aaron-mysql-instance"
   })
-}
+} */
 
 
 
@@ -112,8 +125,25 @@ resource "aws_lambda_permission" "allow_secrets_manager" {
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.secret_rotation.function_name
   principal     = "secretsmanager.amazonaws.com"
-  source_arn    = aws_secretsmanager_secret.mysql_secret.arn
+  //source_arn = aws_secretsmanager_secret.mysql_secret.arn
+  //source_arn = aws_db_instance.mysql.MasterUserSecret.SecretArn
+  source_arn = "arn:aws:secretsmanager:us-east-1:255945442255:secret:*"
 }
+
+/*
+
+# Create a Secrets Manager VPC Endpoint
+resource "aws_vpc_endpoint" "secrets_manager" {
+  vpc_id           = "your-vpc-id" # Replace with your VPC ID
+  subnet_ids       = ["subnet-xxxxxxxxxxxx", "subnet-yyyyyyyyyy"] # Replace with your subnet IDs
+  service_name     = "com.amazonaws.region.secretsmanager" # Secrets Manager service name
+  private_dns_only = true # Optional: For private DNS only
+  tags = {
+    Name = "secrets-manager-vpc-endpoint"
+  }
+}
+
+*/
 
 
 

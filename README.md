@@ -85,6 +85,11 @@ MySQL [mydatabase]> show tables;
 Empty set (0.000 sec)
 
 
+SELECT user, host FROM mysql.user;
+SELECT USER(), CURRENT_USER();
+SHOW VARIABLES LIKE 'skip_networking';
+
+
 Test lambda function:
 secret rotation
 {

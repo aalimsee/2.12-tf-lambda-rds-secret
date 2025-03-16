@@ -1,126 +1,71 @@
 
 
-
-import boto3
-import pymysql
-import os
 import json
-import logging
-import secrets
+import pymysql
+import boto3
+import os
 
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
+# Global variables for the database connection and secret data
+conn = None
+secret_data = None
 
-client = boto3.client('secretsmanager')
+def get_secret(secret_name, region_name):
+    """Retrieve secret data from AWS Secrets Manager."""
+    global secret_data  # Add this line to indicate that secret_data is a global variable
+    client = boto3.client('secretsmanager', region_name=region_name)
+
+    try:
+        response = client.get_secret_value(SecretId=secret_name)
+        secret_data = json.loads(response['SecretString'])
+        return secret_data
+    except Exception as e:
+        print(f"Error retrieving secret: {str(e)}")
+        raise
 
 def lambda_handler(event, context):
-    arn = event['SecretId']
-    #arn = os.environ['SECRET_ARN']
-    token = event['ClientRequestToken']
-    step = event['Step']
+    global conn, secret_data
 
-    metadata = client.describe_secret(SecretId=arn)
-    if not metadata['RotationEnabled']:
-        logger.error(f"Secret {arn} is not enabled for rotation")
-        raise ValueError(f"Secret {arn} is not enabled for rotation")
+    # Set the hardcoded values for host, database, and port
+    db_host = "aaron-mysql-instance.chheppac9ozc.us-east-1.rds.amazonaws.com" #Replace with Your RDS CLuster Name
+    db_name = "mydb"              #Replace with your DB
+    db_port = 3306                #Your MySQL port
 
-    versions = metadata['VersionIdsToStages']
-    if token not in versions:
-        logger.error(f"Secret version {token} has no stage for rotation of secret {arn}.")
-        raise ValueError(f"Secret version {token} has no stage for rotation of secret {arn}.")
+    # Retrieve the secrets from AWS Secrets Manager
+    secret_name = "rds!db-9ac4d634-9ced-4f2b-b17d-d8d712e7a4da" #Your Secret Name
+    region_name = "us-east-1"     #Region where your resources are running
 
-    if "AWSCURRENT" in versions[token]:
-        logger.info(f"Secret version {token} already set as AWSCURRENT for secret {arn}.")
-        return
-    elif "AWSPENDING" not in versions[token]:
-        logger.error(f"Secret version {token} not set as AWSPENDING for rotation of secret {arn}.")
-        raise ValueError(f"Secret version {token} not set as AWSPENDING for rotation of secret {arn}.")
+    if secret_data is None:
+        secret_data = get_secret(secret_name, region_name)
 
-    if step == "createSecret":
-        create_secret(arn, token)
+    # Extract username and password from the secret data
+    db_username = secret_data['username']
+    db_password = secret_data['password']
 
-    elif step == "setSecret":
-        set_secret(arn, token)
-
-    elif step == "testSecret":
-        test_secret(arn, token)
-
-    elif step == "finishSecret":
-        finish_secret(arn, token)
-
-    else:
-        raise ValueError("Invalid step parameter")
-
-def create_secret(arn, token):
-    # Generate a new random password
-    new_password = secrets.token_urlsafe(32)
-
-    # Get the current secret
-    current_secret = client.get_secret_value(SecretId=arn)
-    current_secret_dict = json.loads(current_secret['SecretString'])
-
-    # Create a new secret version with the new password
-    client.put_secret_value(
-        SecretId=arn,
-        ClientRequestToken=token,
-        SecretString=json.dumps({
-            "username": current_secret_dict["username"],
-            "password": new_password
-        }),
-        VersionStages=["AWSPENDING"]
-    )
-    logger.info(f"Created new secret version for {arn} with AWSPENDING stage.")
-
-def set_secret(arn, token):
-    # Get the pending secret
-    pending_secret = client.get_secret_value(SecretId=arn, VersionStage="AWSPENDING")
-    pending_secret_dict = json.loads(pending_secret['SecretString'])
-
-    # Connect to the RDS MySQL instance and update the password
-    try:
-        connection = pymysql.connect(
-            host=os.environ['RDS_HOST'],
-            user=pending_secret_dict["username"],
-            password=pending_secret_dict["password"],
-            database="mysql"
+    if conn is None:
+        # Initialize the database connection if not already created
+        conn = pymysql.connect(
+            host=db_host,
+            user=db_username,
+            password=db_password,
+            database=db_name,
+            port=db_port,
+            connect_timeout=5
         )
-        with connection.cursor() as cursor:
-            cursor.execute(f"ALTER USER '{pending_secret_dict['username']}'@'%' IDENTIFIED BY '{pending_secret_dict['password']}'")
-            connection.commit()
-        logger.info(f"Updated MySQL password for user {pending_secret_dict['username']}.")
-    except Exception as e:
-        logger.error(f"Failed to update MySQL password: {e}")
-        raise
-    finally:
-        if connection:
-            connection.close()
-
-def test_secret(arn, token):
-    # Test the new password by connecting to the database
-    pending_secret = client.get_secret_value(SecretId=arn, VersionStage="AWSPENDING")
-    pending_secret_dict = json.loads(pending_secret['SecretString'])
 
     try:
-        connection = pymysql.connect(
-            host=os.environ['RDS_HOST'],
-            user=pending_secret_dict["username"],
-            password=pending_secret_dict["password"],
-            database="mysql"
-        )
-        logger.info(f"Successfully tested new password for {arn}.")
+        return {
+            'statusCode': 200,
+            'body': json.dumps('Connected to Database successful!')
+        }
     except Exception as e:
-        logger.error(f"Failed to test new password: {e}")
-        raise
+        # Handle errors
+        print(f"Error: {str(e)}")
+        return {
+            'statusCode': 500,
+            'body': json.dumps(f'Error: {str(e)}')
+        }
     finally:
-        if connection:
-            connection.close()
-
-def finish_secret(arn, token):
-    # Promote the pending secret to current
-    client.update_secret_version_stage(
-        SecretId=arn,
-        VersionStage="AWSCURRENT",
-        MoveToVersionId=token,
-        RemoveFromVersionId=client.get_secret_value(SecretId=arn, VersionStage="AWSCURRENT")['VersionId']
-    )
-    logger.info(f"Promoted secret version {token} to AWSCURRENT for {arn}.")
+        # Close the database connection in the finally block to ensure it's always closed
+        if conn is not None:
+            conn.close()
+            conn = None

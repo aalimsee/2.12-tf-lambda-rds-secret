@@ -47,8 +47,9 @@ resource "aws_iam_policy" "lambda_rotation_policy" {
           "secretsmanager:DescribeSecret",
           "secretsmanager:UpdateSecretVersionStage"
         ]
-        Resource = aws_secretsmanager_secret.mysql_secret.arn
+        //Resource = aws_secretsmanager_secret.mysql_secret.arn
         //Resource = "arn:aws:secretsmanager:us-east-1:255945442255:secret:*"
+        Resource = aws_db_instance.mysql.master_user_secret[0].secret_arn
       },
       {
         Effect = "Allow"
@@ -130,10 +131,18 @@ resource "aws_lambda_function" "secret_rotation" {
     security_group_ids = [aws_security_group.lambda_sg.id]
   }
 
+
+  /* MasterUserSecret:
+    SecretArn: arn:aws:secretsmanager:us-east-1:255945442255:secret:rds!db-9ac4d634-9ced-4f2b-b17d-d8d712e7a4da-BToPxi
+    SecretStatus: active
+    KmsKeyId: arn:aws:kms:us-east-1:255945442255:key/aa2c033b-4244-4bfc-b4bb-5a5c75abd35d
+ */
   environment {
     variables = {
-      SECRET_ARN = aws_secretsmanager_secret.mysql_secret.arn # pass secret ARN
-      RDS_HOST   = aws_db_instance.mysql.address              # pass RDS endpoint
+      //SECRET_ARN = aws_secretsmanager_secret.mysql_secret.arn # pass secret ARN
+      DB_HOST = aws_db_instance.mysql.address # pass RDS endpoint
+      DB_NAME = aws_db_instance.mysql.db_name
+      DB_PORT = aws_db_instance.mysql.port
       //EXCLUDE_CHARACTERS = /@"'\
       //EXCLUDE_LOWERCASE = "false"
       //EXCLUDE_NUMBERS = "false"

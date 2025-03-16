@@ -26,9 +26,9 @@ def lambda_handler(event, context):
     global conn, secret_data
 
     # Set the hardcoded values for host, database, and port
-    db_host = "aaron-mysql-instance.chheppac9ozc.us-east-1.rds.amazonaws.com" #Replace with Your RDS CLuster Name
-    db_name = "mydb"              #Replace with your DB
-    db_port = 3306                #Your MySQL port
+    db_host = os.environ.get["DB_HOST"] #"aaron-mysql-instance.chheppac9ozc.us-east-1.rds.amazonaws.com" #Replace with Your RDS CLuster Name
+    db_name = os.environ.get["DB_NAME"] #"mydb"              #Replace with your DB
+    db_port = os.environ.get["DB_PORT"] #3306                #Your MySQL port
 
     # Retrieve the secrets from AWS Secrets Manager
     secret_name = "rds!db-9ac4d634-9ced-4f2b-b17d-d8d712e7a4da" #Your Secret Name
